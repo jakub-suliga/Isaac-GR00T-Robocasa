@@ -51,6 +51,7 @@ if __name__ == "__main__":
         "--host", type=str, help="Host address for the server.", default="localhost"
     )
     parser.add_argument("--video_dir", type=str, help="Directory to save videos.", default=None)
+    parser.add_argument("--obs_dir", type=str, help="Directory to save observations.", default=None)
     parser.add_argument("--n_episodes", type=int, help="Number of episodes to run.", default=2)
     parser.add_argument("--n_envs", type=int, help="Number of parallel environments.", default=1)
     parser.add_argument(
@@ -96,6 +97,7 @@ if __name__ == "__main__":
             multistep=MultiStepConfig(
                 n_action_steps=args.n_action_steps, max_episode_steps=args.max_episode_steps
             ),
+            obs_dir=args.obs_dir,
         )
 
         # Run the simulation

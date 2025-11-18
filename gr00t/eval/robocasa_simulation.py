@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import pickle
 import time
 from dataclasses import dataclass, field
 from functools import partial
@@ -25,7 +24,7 @@ import numpy as np
 # Required for robocasa environments
 import robocasa  # noqa: F401
 import robosuite  # noqa: F401
-from robocasa.utils.gym_utils import GrootRoboCasaEnv  # noqa: F401
+# from robocasa.utils.gym_utils import GrootRoboCasaEnv  # noqa: F401
 
 from gr00t.data.dataset import ModalityConfig
 from gr00t.eval.service import BaseInferenceClient
@@ -34,7 +33,12 @@ from gr00t.eval.wrappers.video_recording_wrapper import (
     VideoRecorder,
     VideoRecordingWrapper,
 )
+
+from gr00t.eval.wrappers.robocasa_wrapper import RoboCasaWrapper, load_robocasa_gym_env
+
 from gr00t.model.policy import BasePolicy
+
+import json
 
 # from gymnasium.envs.registration import registry
 
@@ -76,8 +80,15 @@ class SimulationConfig:
     n_envs: int = 1
     video: VideoConfig = field(default_factory=VideoConfig)
     multistep: MultiStepConfig = field(default_factory=MultiStepConfig)
-    obs_dir: Optional[str] = None
-    """Directory to save observations. If None, observations are not saved."""
+    robots: str = "PandaOmron"
+    controller_configs: Optional[Dict[str, Any]] = None
+    generative_textures: str = "100p"
+    layout_ids: Optional[List[str]] = None
+    style_ids: Optional[List[str]] = None
+    env_configuration: Optional[Dict[str, Any]] = None
+    obj_instance_split: Optional[str] = "A"
+    seed: int = 42
+    collect_data: bool = False
 
 
 class SimulationInferenceClient(BaseInferenceClient, BasePolicy):
@@ -102,7 +113,7 @@ class SimulationInferenceClient(BaseInferenceClient, BasePolicy):
         """Get modality configuration from the inference server."""
         return self.call_endpoint("get_modality_config", requires_input=False)
 
-    def setup_environment(self, config: SimulationConfig) -> gym.vector.VectorEnv:
+    def setup_environment(self, config: SimulationConfig): # -> gym.vector.VectorEnv:
         """Set up the simulation environment based on the provided configuration."""
         # Create environment functions for each parallel environment
         env_fns = [partial(_create_single_env, config=config, idx=i) for i in range(config.n_envs)]
@@ -131,56 +142,14 @@ class SimulationInferenceClient(BaseInferenceClient, BasePolicy):
         completed_episodes = 0
         current_successes = [False] * config.n_envs
         episode_successes = []
-        # Setup observation saving directory if needed
-        obs_dir = None
-        if config.obs_dir is not None:
-            obs_dir = Path(config.obs_dir)
-            obs_dir.mkdir(parents=True, exist_ok=True)
-            print(f"[i] Saving observations to: {obs_dir}")
-        # Track episode observations for saving
-        episode_obs_dict = {env_idx: [] for env_idx in range(config.n_envs)}
         # Initial environment reset
         obs, _ = self.env.reset()
-        # Save initial observations
-        if obs_dir is not None:
-            for env_idx in range(config.n_envs):
-                obs_single = {}
-                for k, v in obs.items():
-                    # Handle different observation types
-                    if isinstance(v, np.ndarray):
-                        if len(v.shape) > 0:
-                            obs_single[k] = v[env_idx] if v.shape[0] > 1 else v
-                        else:
-                            obs_single[k] = v
-                    elif isinstance(v, (list, tuple)):
-                        obs_single[k] = v[env_idx] if len(v) > env_idx else v
-                    else:
-                        # Scalar or string values
-                        obs_single[k] = v
-                episode_obs_dict[env_idx].append(obs_single)
         # Main simulation loop
         while completed_episodes < config.n_episodes:
             # Process observations and get actions from the server
             actions = self._get_actions_from_server(obs)
             # Step the environment
             next_obs, rewards, terminations, truncations, env_infos = self.env.step(actions)
-            # Save observations if needed
-            if obs_dir is not None:
-                for env_idx in range(config.n_envs):
-                    obs_single = {}
-                    for k, v in next_obs.items():
-                        # Handle different observation types
-                        if isinstance(v, np.ndarray):
-                            if len(v.shape) > 0:
-                                obs_single[k] = v[env_idx] if v.shape[0] > 1 else v
-                            else:
-                                obs_single[k] = v
-                        elif isinstance(v, (list, tuple)):
-                            obs_single[k] = v[env_idx] if len(v) > env_idx else v
-                        else:
-                            # Scalar or string values
-                            obs_single[k] = v
-                    episode_obs_dict[env_idx].append(obs_single)
             # Update episode tracking
             for env_idx in range(config.n_envs):
                 current_successes[env_idx] |= bool(env_infos["success"][env_idx][0])
@@ -190,21 +159,12 @@ class SimulationInferenceClient(BaseInferenceClient, BasePolicy):
                 if terminations[env_idx] or truncations[env_idx]:
                     episode_lengths.append(current_lengths[env_idx])
                     episode_successes.append(current_successes[env_idx])
-                    # Save observations for completed episode
-                    if obs_dir is not None and len(episode_obs_dict[env_idx]) > 0:
-                        episode_obs_file = obs_dir / f"episode_{completed_episodes}_env_{env_idx}.pkl"
-                        with open(episode_obs_file, 'wb') as f:
-                            pickle.dump(episode_obs_dict[env_idx], f)
-                        print(f"[i] Saved {len(episode_obs_dict[env_idx])} observations to {episode_obs_file}")
-                        episode_obs_dict[env_idx] = []  # Reset for next episode
                     current_successes[env_idx] = False
                     completed_episodes += 1
                     # Reset trackers for this environment
                     current_rewards[env_idx] = 0
                     current_lengths[env_idx] = 0
             obs = next_obs
-            # Note: gymnasium vectorized environments automatically reset after episode termination
-            # The reset observation is already in next_obs, which becomes obs in the next iteration
         # Clean up
         self.env.reset()
         self.env.close()
@@ -229,42 +189,29 @@ class SimulationInferenceClient(BaseInferenceClient, BasePolicy):
         # Add batch dimension to actions
         return actions
 
-    def run_actions(self, config: SimulationConfig, actions: List[np.ndarray]) -> Tuple[str, List[bool]]:
-        """Run the simulation for the specified number of episodes."""
-        print(
-            f"Running {config.n_episodes} episodes for {config.env_name} with {config.n_envs} environments"
-        )
-        # Set up the environment
-        self.env = self.setup_environment(config)
-        print("Environment setup complete")
-        # Initial environment reset
-        obs, _ = self.env.reset()
-        print("Environment reset complete")
-        # Main simulation loop
-        print("Starting simulation loop")
-
-        for action_idx, action in enumerate(actions):
-            episode_obs = []
-            for action_step in action:
-                action_step = np.expand_dims(action_step, axis=0)
-                print(action_step.shape)
-                obs, rewards, terminations, truncations, env_infos = self.env.step(action_step)
-                episode_obs.append(obs)
-
-                print(obs.keys())
-                break
-            break
-
-        self.env.reset()
-        self.env.close()
-        self.env = None
-
 
 def _create_single_env(config: SimulationConfig, idx: int) -> gym.Env:
     """Create a single environment with appropriate wrappers."""
     # Create base environment
-    env = gym.make(config.env_name, enable_render=True)
-    # return env
+    env_info = json.dumps(config)
+    env = load_robocasa_gym_env(
+        config.env_name,
+        seed=config.seed,
+        # robosuite-related configs
+        robots=config.robots,
+        camera_widths=256,
+        camera_heights=256,
+        render_onscreen=False,
+        # robocasa-related configs
+        obj_instance_split="A",
+        generative_textures="100p" if config.generative_textures else None,
+        randomize_cameras=False,
+        layout_ids=config.layout_ids,
+        style_ids=config.style_ids,
+        # data collection configs
+        collect_data=config.collect_data,
+    )
+    env = RoboCasaWrapper(env)
     # Add video recording wrapper if needed (only for the first environment)
     if config.video.video_dir is not None:
         video_recorder = VideoRecorder.create_h264(

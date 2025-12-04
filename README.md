@@ -1,3 +1,21 @@
+#Robocasa
+
+To use robocasa:
+
+change in setup.py to this values:
+"numpy>=1.23.3",
+"numba>=0.56.4",
+
+and in __init__.py in robocasa/robocasa:
+deltete this:
+ assert numpy.__version__ in [
+     "1.23.2",
+     "1.23.3",
+     "1.23.5",
+ ], "numpy version must be either 1.23.{2,3,5}. Please install one of these versions."
+
+
+
 <div align="center">
 
 

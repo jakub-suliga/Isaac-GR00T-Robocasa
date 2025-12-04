@@ -204,6 +204,7 @@ class MultiStepWrapper(gym.Wrapper):
         states = []
         rewards = []
         dones = []
+        chunk_success = False
         for step in range(self.n_action_steps):
             act = {}
             for key, value in action.items():
@@ -212,6 +213,16 @@ class MultiStepWrapper(gym.Wrapper):
                 # termination
                 break
             observation, reward, done, truncated, info = super().step(act)
+
+            
+            if "is_success" in info:
+                val = info["is_success"]
+                if isinstance(val, (list, np.ndarray, tuple)):
+                    if np.any(val):
+                            chunk_success = True
+                elif val:
+                    chunk_success = True
+
             env_state = {"states": [], "model": []}
             states.append(env_state["states"])
             rewards.append(reward)
@@ -230,6 +241,14 @@ class MultiStepWrapper(gym.Wrapper):
         reward = aggregate(self.reward, self.reward_agg_method)
         done = aggregate(self.done, "max")
         info = dict_take_last_n(self.info, self.max_steps_needed)
+
+        if chunk_success:
+            if "is_success" in info:
+                if isinstance(info["is_success"], np.ndarray):
+                    info["is_success"][:] = True
+                elif isinstance(info["is_success"], list):
+                    info["is_success"] = [True] * len(info["is_success"])
+
         states = np.array(states)
         rewards = np.array(rewards)
         dones = np.array(dones)
@@ -249,6 +268,7 @@ class MultiStepWrapper(gym.Wrapper):
         assert len(self.obs) > 0
         if isinstance(self.observation_space, spaces.Dict):
             result = dict()
+            #print("Keys:", self.observation_space.keys())
             for key in self.observation_space.keys():
                 if key.startswith("video"):
                     """

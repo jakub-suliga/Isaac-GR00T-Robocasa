@@ -127,7 +127,7 @@ class TrainRunner:
         train_dataset,
         data_collator,
         compute_dtype,
-        global_batch_size=None,
+        global_batch_size=256,
     ):
         # Set the gradient accumulation steps if global_batch_size is provided
         if global_batch_size is not None:

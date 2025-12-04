@@ -21,6 +21,8 @@ from collections import deque
 from pathlib import Path
 
 import numpy as np
+import sys
+sys.path.append(str(Path(__file__).parent.parent))
 
 from gr00t.eval.robot import RobotInferenceServer
 from gr00t.eval.robocasa_simulation import (
@@ -36,7 +38,7 @@ from tqdm import tqdm, trange
 
 from gr00t.eval.robot import RobotInferenceClient
 from gr00t.eval.wrappers.multistep_wrapper import MultiStepWrapper
-from gr00t.eval.wrappers.record_video import RecordVideo
+from gr00t.eval.wrappers.video_recording_wrapper import RecordVideo
 from gr00t.eval.wrappers.robocasa_wrapper import RoboCasaWrapper, load_robocasa_gym_env
 import cv2
 
@@ -177,195 +179,163 @@ if __name__ == "__main__":
 
 
     args = parser.parse_args()
+    simulation_client = SimulationInferenceClient(host=args.host, port=args.port)
 
-    if args.server:
-        # Create a policy
-        policy = Gr00tPolicy(
-            model_path=args.model_path,
-            embodiment_tag=args.embodiment_tag,
-        )
+    print("Available modality configs:")
+    modality_config = simulation_client.get_modality_config()
+    print(modality_config.keys())
 
-        # Start the server
-        server = RobotInferenceServer(policy, port=args.port)
-        server.run()
+    # ROBOCASA ENV SETUP
+    # load robocasa env
+    controller_config = load_composite_controller_config(
+        controller=args.controller,
+        robot=args.robots if isinstance(args.robots, str) else args.robots[0],
+    )
 
-    elif args.client:
-        # Create a simulation client
-        simulation_client = SimulationInferenceClient(host=args.host, port=args.port)
+    env_name = args.env_name
+    # Create argument configuration
+    config = {
+        "env_name": env_name,
+        "robots": args.robots,
+        "controller_configs": controller_config,
+        "generative_textures": "100p",
+    }
 
-        print("Available modality configs:")
-        modality_config = simulation_client.get_modality_config()
-        print(modality_config.keys())
+    # Check if we're using a multi-armed environment and use env_configuration argument if so
+    if "TwoArm" in env_name:
+        config["env_configuration"] = args.config
 
-        # ROBOCASA ENV SETUP
-        # load robocasa env
-        controller_config = load_composite_controller_config(
-            controller=args.controller,
-            robot=args.robots if isinstance(args.robots, str) else args.robots[0],
-        )
-
-        env_name = args.env_name
-        # Create argument configuration
-        config = {
-            "env_name": env_name,
-            "robots": args.robots,
-            "controller_configs": controller_config,
-            "generative_textures": "100p",
-        }
-
-        # Check if we're using a multi-armed environment and use env_configuration argument if so
-        if "TwoArm" in env_name:
-            config["env_configuration"] = args.config
-
-        # Mirror actions if using a kitchen environment
-        if env_name in ["Lift"]:  # add other non-kitchen tasks here
-            if args.obj_groups is not None:
-                print(
-                    "Specifying 'obj_groups' in non-kitchen environment does not have an effect."
-                )
-        else:
-            config["layout_ids"] = args.layout
-            config["style_ids"] = args.style
-            ### update config for kitchen envs ###
-            if args.obj_groups is not None:
-                config.update({"obj_groups": args.obj_groups})
-
-            # by default use obj instance split A
-            config["obj_instance_split"] = "A"
-            # config["obj_instance_split"] = None
-            # config["obj_registries"] = ("aigen",)
-
-        # Grab reference to controller config and convert it to json-encoded string
-        env_info = json.dumps(config)
-
-        env = load_robocasa_gym_env(
-            args.env_name,
-            seed=args.seed,
-            # robosuite-related configs
-            robots=args.robots,
-            camera_widths=256,
-            camera_heights=256,
-            render_onscreen=False,
-            # robocasa-related configs
-            obj_instance_split="A",
-            generative_textures="100p" if args.generative_textures else None,
-            randomize_cameras=False,
-            layout_ids=args.layout,
-            style_ids=args.style,
-            # data collection configs
-            collect_data=args.collect_data,
-        )
-        print(f"Environment {args.env_name} loaded successfully.")
-
-        env = RoboCasaWrapper(env)
-
-        stats = defaultdict(list)
-        if os.path.exists(f"{args.video_dir}/prediction.txt"):
-            with open(f"{args.video_dir}/prediction.txt", "r") as f:
-                for line in f:
-                    success = line.strip().split(":")[-1].strip()
-                    add_to(stats, flatten({"is_success": success}))
-
-        record_video = args.video_dir is not None
-        if record_video:
-            video_base_path = Path(args.video_dir)
-            # video_base_path.mkdir(parents=True, exist_ok=True)
-            trigger = len(stats['is_success']) if 'is_success' in stats else 1
-            print(f"Recording videos from episode {trigger}")
-
-            episode_trigger = lambda t: t % trigger == 0  # noqa
-            env = RecordVideo(
-                    env, 
-                    video_base_path, 
-                    disable_logger=True, 
-                    episode_trigger=episode_trigger, 
-                    fps=20,
-                    name_prefix=f"{args.env_name}",
-                )
-
-        env = MultiStepWrapper(
-            env,
-            video_delta_indices=np.arange(1),
-            state_delta_indices=np.arange(1),
-            n_action_steps=args.action_horizon,
-        )
-
-        # postprocess function of action, to handle the case where number of dimensions are not the same
-        def postprocess_action(action):
-            new_action = {}
-            for k, v in action.items():
-                if v.ndim == 1:
-                    new_action[k] = v[..., None]
-                else:
-                    new_action[k] = v
-            return new_action
-
-        print(f"Starting evaluation for {args.env_name} with {args.n_episodes} episodes...")
-        # main evaluation loop
-        for i in trange(args.n_episodes):
-            pbar = tqdm(
-                total=args.max_episode_steps, desc=f"Episode {i} / {env.unwrapped.get_ep_meta()['lang']}", leave=False
+    # Mirror actions if using a kitchen environment
+    if env_name in ["Lift"]:  # add other non-kitchen tasks here
+        if args.obj_groups is not None:
+            print(
+                "Specifying 'obj_groups' in non-kitchen environment does not have an effect."
             )
-            obs, info = env.reset()
-            if i < len(stats['is_success']):
-                print(f"Skipping episode {i} as it has already been evaluated.")
-                continue
-            done = False
-            step = 0
-                
-            while not done:
-                obs['video.left_view'] = np.flip(obs['video.left_view'], axis=1)
-                obs['video.right_view'] = np.flip(obs['video.right_view'], axis=1)
-                obs['video.wrist_view'] = np.flip(obs['video.wrist_view'], axis=1)
-
-                #####
-                # Save current frame images as PNG files
-                # Ensure directory exists
-                # save_dir = Path(args.video_dir) if args.video_dir else Path("./collected_data")
-                # save_dir.mkdir(parents=True, exist_ok=True)
-                
-                # # Create episode-specific directory
-                # episode_dir = save_dir / f"episode_{i}"
-                # episode_dir.mkdir(exist_ok=True)
-                
-                # # Save the current frame images
-                # left_img = obs['video.left_view'][0]
-                # right_img = obs['video.right_view'][0]
-                # wrist_img =  obs['video.wrist_view'][0]
-                # print(f"Shape of left_img: {left_img.shape}, right_img: {right_img.shape}, wrist_img: {wrist_img.shape}")
-                
-                # cv2.imwrite(str(episode_dir / f"left_view_step_{step}.png"), cv2.cvtColor(left_img, cv2.COLOR_RGB2BGR))
-                # cv2.imwrite(str(episode_dir / f"right_view_step_{step}.png"), cv2.cvtColor(right_img, cv2.COLOR_RGB2BGR))
-                # cv2.imwrite(str(episode_dir / f"wrist_view_step_{step}.png"), cv2.cvtColor(wrist_img, cv2.COLOR_RGB2BGR))
-
-                #####
-
-                action = simulation_client.get_action(obs)
-                post_action = postprocess_action(action)
-
-                # step = env.step(post_action)
-                # print(f"Step: {step}, Action: {post_action}")
-
-                # (next_obs, obs_seq), reward, terminated, truncated, info = env.step(post_action)
-                obs, reward, terminated, truncated, info = env.step(post_action)
-                done = terminated or truncated
-                step += args.action_horizon
-                
-                pbar.update(args.action_horizon)
-            add_to(stats, flatten({"is_success": info["is_success"]}))
-            with open(f"{args.video_dir}/prediction.txt", "a") as f:
-                f.write(f"episode {i} is_success: {info['is_success']} \n")
-            pbar.close()
-
-        env.close()
-
-        for k, v in stats.items():
-            stats[k] = np.mean(v)
-            with open(f"{args.video_dir}/prediction.txt", "a") as f:
-                f.write(f'{k}: {stats[k]} \n')
-        print(stats)
-        
-        exit()
-
     else:
-        raise ValueError("Please specify either --server or --client")
+        config["layout_ids"] = args.layout
+        config["style_ids"] = args.style
+        ### update config for kitchen envs ###
+        if args.obj_groups is not None:
+            config.update({"obj_groups": args.obj_groups})
+
+        # by default use obj instance split A
+        config["obj_instance_split"] = "A"
+        # config["obj_instance_split"] = None
+        # config["obj_registries"] = ("aigen",)
+
+    # Grab reference to controller config and convert it to json-encoded string
+    env_info = json.dumps(config)
+
+    env = load_robocasa_gym_env(
+        args.env_name,
+        seed=args.seed,
+        # robosuite-related configs
+        robots=args.robots,
+        camera_widths=256,
+        camera_heights=256,
+        render_onscreen=False,
+        camera_names=["robot0_agentview_left", "robot0_agentview_right", "robot0_eye_in_hand"],
+        # robocasa-related configs
+        obj_instance_split="A",
+        generative_textures="100p" if args.generative_textures else None,
+        randomize_cameras=False,
+        layout_ids=args.layout,
+        style_ids=args.style,
+        # data collection configs
+        collect_data=args.collect_data,
+    )
+    print(f"Environment {args.env_name} loaded successfully.")
+
+    env = RoboCasaWrapper(env)
+
+    stats = defaultdict(list)
+    if os.path.exists(f"{args.video_dir}/prediction.txt"):
+        with open(f"{args.video_dir}/prediction.txt", "r") as f:
+            for line in f:
+                success = line.strip().split(":")[-1].strip()
+                add_to(stats, flatten({"is_success": success}))
+
+    record_video = args.video_dir is not None
+    if record_video:
+        video_base_path = Path(args.video_dir)
+        # video_base_path.mkdir(parents=True, exist_ok=True)
+        trigger = len(stats['is_success']) if 'is_success' in stats else 1
+        print(f"Recording videos from episode {trigger}")
+
+        episode_trigger = lambda t: t % trigger == 0  # noqa
+        env = RecordVideo(
+                env, 
+                video_base_path, 
+                disable_logger=True, 
+                episode_trigger=episode_trigger, 
+                fps=20,
+                name_prefix=f"{args.env_name}",
+            )
+
+    env = MultiStepWrapper(
+        env,
+        video_delta_indices=np.arange(1),
+        state_delta_indices=np.arange(1),
+        n_action_steps=args.action_horizon,
+        max_episode_steps=args.max_episode_steps,
+    )
+
+    # postprocess function of action, to handle the case where number of dimensions are not the same
+    def postprocess_action(action):
+        new_action = {}
+        for k, v in action.items():
+            if v.ndim == 1:
+                new_action[k] = v[..., None]
+            else:
+                new_action[k] = v
+        return new_action
+
+    print(f"Starting evaluation for {args.env_name} with {args.n_episodes} episodes...")
+    # main evaluation loop
+    for i in trange(args.n_episodes):
+        obs, info = env.reset()
+        lang_instruction = env.unwrapped.get_ep_meta()['lang']
+
+        pbar = tqdm(
+            total=args.max_episode_steps, desc=f"Episode {i} / {lang_instruction}", leave=False
+        )
+        if i < len(stats['is_success']):
+            print(f"Skipping episode {i} as it has already been evaluated.")
+            continue
+        done = False
+        step = 0
+            
+        while not done:
+            obs["annotation.human.action.task_description"] = np.array(lang_instruction)
+            obs['video.left_view'] = np.flip(obs['video.left_view'], axis=1)
+            obs['video.right_view'] = np.flip(obs['video.right_view'], axis=1)
+            obs['video.wrist_view'] = np.flip(obs['video.wrist_view'], axis=1)
+            print(f"Observation at step {step}: {obs}")
+            action = simulation_client.get_action(obs)
+            print(f"Action at step {step}: {action}")
+            post_action = postprocess_action(action)
+            obs, reward, terminated, truncated, info = env.step(post_action)
+            is_success = info["is_success"][-1]
+            if is_success:
+                print(f"Success detected at step {step}!")
+                done = True
+            else:
+                done = terminated or truncated
+            step += args.action_horizon
+            
+            pbar.update(args.action_horizon)
+        success = info["is_success"][-1]
+        add_to(stats, flatten({"is_success": success}))
+        with open(f"{args.video_dir}/prediction.txt", "a") as f:
+            f.write(f"episode {i} is_success: {success} \n")
+        pbar.close()
+
+    env.close()
+
+    for k, v in stats.items():
+        stats[k] = np.mean(v)
+        with open(f"{args.video_dir}/prediction.txt", "a") as f:
+            f.write(f'{k}: {stats[k]} \n')
+    print(stats)
+    
+    exit()

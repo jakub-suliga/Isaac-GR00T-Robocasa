@@ -357,6 +357,7 @@ def main(config: ArgsConfig):
         dataloader_pin_memory=False,
         dataloader_prefetch_factor=config.dataloader_prefetch_factor,
         dataloader_persistent_workers=config.dataloader_num_workers > 0,
+        auto_find_batch_size=True,
         optim="adamw_torch",
         adam_beta1=0.95,
         adam_beta2=0.999,

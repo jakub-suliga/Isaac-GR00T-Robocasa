@@ -1,35 +1,35 @@
 #!/bin/bash
-#SBATCH --job-name=groot_n1_5_libero
-#SBATCH --nodes=1
-#SBATCH --gpus=2
-#SBATCH --comment="GR00T N1.5 finetune on Robocasa dataset"
-#SBATCH --partition=batch
-#SBATCH --output=out/%j-groot_n1_5_libero.out
-#SBATCH --error=out/%j-groot_n1_5_libero.err
+#SBATCH -p accelerated-h200-8
+#SBATCH --gres=gpu:8
+#SBATCH --mem=256G
+#SBATCH --time=48:00:00
+#SBATCH -J train_flower
+#SBATCH -o logs/%x_%j.out
+#SBATCH -e logs/%x_%j.err
 
-HOME_DIR=$(pwd)
-BASE_DIR=/virtual_lab/sjw_alinlab/taeyoung/workspace
-CONDA_PATH=/virtual_lab/sjw_alinlab/taeyoung/miniconda3
 
-export WANDB_PROJECT=GR00T-robocasa
+BASE_DIR="/hkfs/work/workspace/scratch/uhtfz-groot-robo"
+CKPT_DIR="$BASE_DIR/outputs/gr00t_finetune/"
+DATA_DIR="$BASE_DIR/data/robocasa_mg_gr00t_100"
 
-CKPT_DIR="$BASE_DIR/ckpt/robocasa/groot/groot_n1_5_bs32"
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export TOKENIZERS_PARALLELISM=false
+export HYDRA_FULL_ERROR=1
 
-# DATA_DIR=/virtual_lab/sjw_alinlab/taeyoung/LVLA/data/bridge_orig_lerobot
-# DATA_DIR=$BASE_DIR/Isaac-GR00T/demo_data/robot_sim.PickNPlace
-DATA_DIR=/virtual_lab/sjw_alinlab/taeyoung/workspace/data/huggingface/lerobot/kimtaey/robocasa_mg_gr00t_100
 
-source $CONDA_PATH/bin/activate gr00t
 
-python $BASE_DIR/Isaac-GR00T/scripts/gr00t_finetune.py \
-    --dataset-path $DATA_DIR \
-    --output-dir $CKPT_DIR \
-    --dataloader-num-workers 64 \
+
+source ~/.bashrc
+conda activate gr00t
+
+python /hkfs/work/workspace/scratch/uhtfz-groot-robo/Isaac-GR00T/scripts/gr00t_finetune.py \
+    --dataset-path /hkfs/work/workspace/scratch/uhtfz-groot-robo/data/robocasa_mg_gr00t_100 \
+    --output-dir /hkfs/work/workspace/scratch/uhtfz-groot-robo/outputs/gr00t_finetune3/ \
+    --dataloader-num-workers 32 \
     --data-config single_panda_gripper \
     --embodiment-tag new_embodiment \
     --base-model-path nvidia/GR00T-N1.5-3B \
-    --run-name GR00T-N1.5-libero-fromPT \
-    --batch-size 16 \
-    --num-gpus 2 \
-    --max-steps 60000 \
+    --batch-size 128 \
+    --num-gpus 8 \
+    --max-steps 300000 \
     --save-steps 10000 

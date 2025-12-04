@@ -119,8 +119,9 @@ class VideoRecorder:
         if self.is_ready():
             # if still recording, stop first and start anew.
             self.stop()
+        Path(file_path).parent.mkdir(parents=True, exist_ok=True)
 
-        self.container = av.open(file_path, mode="w")
+        self.container = av.open(str(file_path), mode="w")
         self.stream = self.container.add_stream(self.codec, rate=self.fps)
         codec_context = self.stream.codec_context
         for k, v in self.kwargs.items():
@@ -212,7 +213,8 @@ class VideoRecordingWrapper(gym.Wrapper):
             original_filestem = self.file_path.stem
             new_filestem = f"{original_filestem}_success{int(self.is_success)}"
             new_file_path = self.video_dir / f"{new_filestem}.mp4"
-            os.rename(self.file_path, new_file_path)
+            if self.file_path.exists():
+                os.rename(self.file_path, new_file_path)
 
         self.is_success = False
         if self.video_dir is not None:
@@ -220,8 +222,17 @@ class VideoRecordingWrapper(gym.Wrapper):
         return result
 
     def step(self, action):
-        result = super().step(action)
+        obs, reward, terminated, truncated, info = super().step(action)
         self.step_count += 1
+
+        success_val = info.get("success", info.get("is_success", False))
+        if isinstance(success_val, (list, np.ndarray, tuple)):
+             if len(success_val) > 0:
+                 if np.any(success_val):
+                     self.is_success = True
+        elif success_val:
+             self.is_success = True
+
         if self.file_path is not None and ((self.step_count % self.steps_per_render) == 0):
             if not self.video_recorder.is_ready():
                 self.video_recorder.start(self.file_path)
@@ -229,10 +240,62 @@ class VideoRecordingWrapper(gym.Wrapper):
             frame = self.env.render()
             assert frame.dtype == np.uint8
             self.video_recorder.write_frame(frame)
-            self.is_success = result[-1]["success"]
-        return result
+        
+        if "is_success" not in info:
+            info["is_success"] = self.is_success
+        
+        return obs, reward, terminated, truncated, info
 
     def render(self, mode="rgb_array", **kwargs):
         if self.video_recorder.is_ready():
             self.video_recorder.stop()
         return self.file_path
+
+class RecordVideo(VideoRecordingWrapper):
+    """
+    A wrapper compatible with gymnasium.wrappers.RecordVideo interface but using VideoRecorder logic.
+    """
+    def __init__(
+        self, 
+        env, 
+        video_folder: str | Path, 
+        episode_trigger=None, 
+        step_trigger=None, 
+        video_length=0, 
+        name_prefix="rl-video", 
+        fps=20, 
+        disable_logger=True,
+        **kwargs
+    ):
+        video_dir = Path(video_folder)
+        video_recorder = VideoRecorder.create_h264(fps=fps)
+        
+        super().__init__(
+            env, 
+            video_recorder=video_recorder, 
+            video_dir=video_dir, 
+            steps_per_render=1,
+            **kwargs
+        )
+        
+        self.episode_trigger = episode_trigger
+        self.step_trigger = step_trigger
+        self.episode_id = 0
+        self.name_prefix = name_prefix
+        
+    def reset(self, **kwargs):
+        if self.episode_trigger:
+            do_record = self.episode_trigger(self.episode_id)
+        else:
+            do_record = True 
+            
+        obs, info = super().reset(**kwargs)
+        
+        if do_record:
+            self.file_path = self.video_dir / f"{self.name_prefix}-episode-{self.episode_id}.mp4"
+        else:
+            self.file_path = None
+            
+        self.episode_id += 1
+        
+        return obs, info

@@ -83,6 +83,7 @@ eval-result/
 hostfile
 core.*
 *.out
+*.err
 captioner_bk/
 slurm-logs/
 captioner/
